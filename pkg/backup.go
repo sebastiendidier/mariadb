@@ -18,6 +18,7 @@ package pkg
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 
 	api_v1beta1 "stash.appscode.dev/apimachinery/apis/stash/v1beta1"
@@ -28,9 +29,11 @@ import (
 	"github.com/spf13/cobra"
 	license "go.bytebuilders.dev/license-verifier/kubernetes"
 	"gomodules.xyz/flags"
+	shell "gomodules.xyz/go-sh"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 	appcatalog "kmodules.xyz/custom-resources/apis/appcatalog/v1alpha1"
 	appcatalog_cs "kmodules.xyz/custom-resources/client/clientset/versioned"
 	v1 "kmodules.xyz/offshoot-api/api/v1"
@@ -219,10 +222,55 @@ func (opt *mariadbOptions) backupMariaDB(targetRef api_v1beta1.TargetRef) (*rest
 		return nil, err
 	}
 
-	session.setUserArgs(opt.myArgs)
+	databases2exclude := map[string]bool{"information_schema": true, "my_database": true, "mysql": true, "performance_schema": true, "sys": true, "test": true}
+	databases, err := session.getDbNames()
+	var databases2dump []string
+	if err != nil {
+		return nil, err
+	}
 
-	// append the backup command to the pipeline
-	opt.backupOptions.StdinPipeCommands = append(opt.backupOptions.StdinPipeCommands, *session.cmd)
+	for _, db := range databases {
+		if db != "" && !databases2exclude[db] {
+			databases2dump = append(databases2dump, db)
+		}
+	}
+
+	klog.Infof("databases2dump : %v", databases2dump)
+	dumpdir := opt.setupOptions.ScratchDir + "/dumpsql"
+	err = os.Mkdir(dumpdir, 0750)
+	if err != nil {
+		return nil, err
+	}
+
+	tables2exclude := []string{"cache_hubber_persistent", "key_value_expire", "sessions"}
+
+	for _, db := range databases2dump {
+		dumpfile := dumpdir + "/" + db + ".sql"
+
+		sh := shell.NewSession()
+		for k, v := range session.sh.Env {
+			sh.SetEnv(k, v)
+		}
+
+		args := session.cmd.Args
+		for _, table := range tables2exclude {
+			args = append(args, "--ignore-table-data="+db+"."+table)
+		}
+
+		args = append(args, opt.myArgs)
+		args = append(args, db)
+
+		klog.Infof("Running : %s %v", MariaDBDumpCMD, args)
+
+		err = sh.Command(MariaDBDumpCMD, args...).WriteStdout(dumpfile)
+		if err != nil {
+			klog.Infof("Error dump database %s. Reason: %v.", err)
+		}
+	}
+
+	opt.backupOptions.StdinPipeCommands = nil
+	opt.backupOptions.BackupPaths = []string{dumpdir}
+
 	resticWrapper, err := restic.NewResticWrapperFromShell(opt.setupOptions, session.sh)
 	if err != nil {
 		return nil, err

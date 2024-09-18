@@ -42,8 +42,8 @@ const (
 	MariaDBUser        = "username"
 	MariaDBPassword    = "password"
 	MariaDBDumpFile    = "dumpfile.sql"
-	MariaDBDumpCMD     = "mysqldump"
-	MariaDBRestoreCMD  = "mysql"
+	MariaDBDumpCMD     = "mariadb-dump"
+	MariaDBRestoreCMD  = "mariadb"
 	EnvMariaDBPassword = "MYSQL_PWD"
 )
 
@@ -147,15 +147,37 @@ func (session *sessionWrapper) waitForDBReady(waitTimeout int32) error {
 	// Execute "SELECT 1" query to the database. It should return an error when mysqld is not ready.
 	args := append(session.cmd.Args, "-e", "SELECT 1;")
 
+	klog.Infof("Database arguments %v", args)
+
 	// don't show the output of the query
 	sh.Stdout = nil
 
 	return wait.PollUntilContextTimeout(context.Background(), 5*time.Second, time.Duration(waitTimeout)*time.Second, true, func(ctx context.Context) (done bool, err error) {
-		if err := sh.Command("mysql", args...).Run(); err == nil {
+		if err := sh.Command("mariadb", args...).Run(); err == nil {
 			klog.Infoln("Database is accepting connection....")
 			return true, nil
 		}
 		klog.Infof("Unable to connect with the database. Reason: %v.\nRetrying after 5 seconds....", err)
 		return false, nil
 	})
+}
+
+func (session *sessionWrapper) getDbNames() ([]string, error) {
+	klog.Infoln("Querying databases names...")
+
+	sh := shell.NewSession()
+	for k, v := range session.sh.Env {
+		sh.SetEnv(k, v)
+	}
+
+	args := append(session.cmd.Args, "-s", "-e", "SHOW DATABASES;")
+
+	if output, err := sh.Command("mariadb", args...).Output(); err == nil {
+		// Diviser la sortie par les lignes
+		databases := strings.Split(string(output), "\n")
+
+		klog.Infof("Databases : %v", databases)
+		return databases, nil
+	}
+	return nil, nil
 }
